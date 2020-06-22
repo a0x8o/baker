@@ -2,6 +2,7 @@ package com.ing.baker.runtime.akka.actor.process_index
 
 import java.util.concurrent.TimeUnit
 
+import akka.actor.{ActorRef, ActorRefProvider}
 import cats.instances.list._
 import cats.instances.try_._
 import cats.syntax.traverse._
@@ -9,14 +10,31 @@ import com.ing.baker.runtime.akka.actor.ClusterBakerActorProvider.GetShardIndex
 import com.ing.baker.runtime.akka.actor.process_index.ProcessIndex._
 import com.ing.baker.runtime.akka.actor.process_index.ProcessIndexProtocol.FireSensoryEventReaction.{NotifyBoth, NotifyOnEvent, NotifyWhenCompleted, NotifyWhenReceived}
 import com.ing.baker.runtime.akka.actor.process_index.ProcessIndexProtocol.{ProcessEventReceivedResponse, _}
-import com.ing.baker.runtime.akka.actor.serialization.ProtoMap.{ctxFromProto, ctxToProto, versioned}
-import com.ing.baker.runtime.akka.actor.serialization.protomappings.SensoryEventStatusMappingHelper
-import com.ing.baker.runtime.akka.actor.serialization.{ProtoMap, SerializersProvider}
+import com.ing.baker.runtime.akka.actor.process_index.protobuf.ActorRefId
+import com.ing.baker.runtime.akka.actor.serialization.AkkaSerializerProvider
+import com.ing.baker.runtime.serialization.ProtoMap.{ctxFromProto, ctxToProto, versioned}
+import com.ing.baker.runtime.serialization.protomappings.SensoryEventStatusMappingHelper
+import com.ing.baker.runtime.serialization.ProtoMap
 
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
 
 object ProcessIndexProto {
+
+  implicit def akkaActorRefMapping(implicit ev0: ActorRefProvider): ProtoMap[ActorRef, protobuf.ActorRefId] =
+    new ProtoMap[ActorRef, protobuf.ActorRefId] {
+
+      val companion = protobuf.ActorRefId
+
+      override def toProto(a: ActorRef): protobuf.ActorRefId =
+      protobuf.ActorRefId(Some(akka.serialization.Serialization.serializedActorPath(a)))
+
+      override def fromProto(message: ActorRefId): Try[ActorRef] =
+      for {
+        identifier <- versioned(message.identifier, "identifier")
+        actorRef <- Try(ev0.resolveActorRef(identifier))
+      } yield actorRef
+    }
 
   implicit def getShardIndexProto: ProtoMap[GetShardIndex, protobuf.GetShardIndex] =
     new ProtoMap[GetShardIndex, protobuf.GetShardIndex] {
@@ -169,7 +187,7 @@ object ProcessIndexProto {
         } yield CreateProcess(recipeId, recipeInstanceId)
     }
 
-  implicit def processEventProto(implicit provider: SerializersProvider): ProtoMap[ProcessEvent, protobuf.ProcessEvent] =
+  implicit def processEventProto(implicit actorRefProvider: ActorRefProvider): ProtoMap[ProcessEvent, protobuf.ProcessEvent] =
     new ProtoMap[ProcessEvent, protobuf.ProcessEvent] {
 
       val companion = protobuf.ProcessEvent
@@ -180,20 +198,20 @@ object ProcessIndexProto {
           Some(ctxToProto(a.event)),
           a.correlationId,
           Some(a.timeout.toMillis),
-          Some(a.reaction match {
+          (a.reaction match {
             case FireSensoryEventReaction.NotifyWhenReceived =>
-              protobuf.FireSensoryEventReaction(
-                protobuf.FireSensoryEventReaction.SealedValue.Received(protobuf.NotifyWhenReceived()))
+              protobuf.FireSensoryEventReactionMessage(
+                protobuf.FireSensoryEventReactionMessage.SealedValue.Received(protobuf.NotifyWhenReceived()))
             case FireSensoryEventReaction.NotifyWhenCompleted(waitForRetries) =>
-              protobuf.FireSensoryEventReaction(
-                protobuf.FireSensoryEventReaction.SealedValue.Completed(protobuf.NotifyWhenCompleted(Some(waitForRetries))))
+              protobuf.FireSensoryEventReactionMessage(
+                protobuf.FireSensoryEventReactionMessage.SealedValue.Completed(protobuf.NotifyWhenCompleted(Some(waitForRetries))))
             case FireSensoryEventReaction.NotifyBoth(waitForRetries, receiver) =>
-              protobuf.FireSensoryEventReaction(
-                protobuf.FireSensoryEventReaction.SealedValue.Both(protobuf.NotifyBoth(Some(waitForRetries), Some(ctxToProto(receiver)))))
+              protobuf.FireSensoryEventReactionMessage(
+                protobuf.FireSensoryEventReactionMessage.SealedValue.Both(protobuf.NotifyBoth(Some(waitForRetries), Some(ctxToProto(receiver)))))
             case FireSensoryEventReaction.NotifyOnEvent(waitForRetries, onEvent) =>
-              protobuf.FireSensoryEventReaction(
-                protobuf.FireSensoryEventReaction.SealedValue.OnEvent(protobuf.NotifyOnEvent(Some(waitForRetries), Some(onEvent))))
-          })
+              protobuf.FireSensoryEventReactionMessage(
+                protobuf.FireSensoryEventReactionMessage.SealedValue.OnEvent(protobuf.NotifyOnEvent(Some(waitForRetries), Some(onEvent))))
+          }).toFireSensoryEventReaction
         )
 
       def fromProto(message: protobuf.ProcessEvent): Try[ProcessEvent] =
@@ -201,25 +219,25 @@ object ProcessIndexProto {
           recipeInstanceId <- versioned(message.recipeInstanceId, "RecipeInstanceId")
           eventProto <- versioned(message.event, "event")
           timeout <- versioned(message.timeout, "timeout")
-          reactionProto <- versioned(message.reaction, "reaction")
+          reactionProto = message.reaction
           event <- ctxFromProto(eventProto)
-          reaction <- reactionProto.sealedValue match {
-            case protobuf.FireSensoryEventReaction.SealedValue.Received(_) =>
+          reaction <- reactionProto.asMessage.sealedValue match {
+            case protobuf.FireSensoryEventReactionMessage.SealedValue.Received(_) =>
               Success(NotifyWhenReceived)
-            case protobuf.FireSensoryEventReaction.SealedValue.Completed(protobuf.NotifyWhenCompleted(waitForRetries)) =>
+            case protobuf.FireSensoryEventReactionMessage.SealedValue.Completed(protobuf.NotifyWhenCompleted(waitForRetries)) =>
               versioned(waitForRetries, "waitForRetries").map(NotifyWhenCompleted.apply)
-            case protobuf.FireSensoryEventReaction.SealedValue.Both(protobuf.NotifyBoth(waitForRetriesProto, receiverProto)) =>
+            case protobuf.FireSensoryEventReactionMessage.SealedValue.Both(protobuf.NotifyBoth(waitForRetriesProto, receiverProto)) =>
               for {
                 waitForRetries <- versioned(waitForRetriesProto, "waitForRetries")
                 receiverProto <- versioned(receiverProto, "receiver")
                 receiver <- ctxFromProto(receiverProto)
               } yield NotifyBoth(waitForRetries, receiver)
-            case protobuf.FireSensoryEventReaction.SealedValue.OnEvent(protobuf.NotifyOnEvent(waitForRetriesProto, onEventProto)) =>
+            case protobuf.FireSensoryEventReactionMessage.SealedValue.OnEvent(protobuf.NotifyOnEvent(waitForRetriesProto, onEventProto)) =>
               for {
                 waitForRetries <- versioned(waitForRetriesProto, "waitForRetries")
                 onEvent <- versioned(onEventProto, "onEvent")
               } yield NotifyOnEvent(waitForRetries, onEvent)
-            case protobuf.FireSensoryEventReaction.SealedValue.Empty =>
+            case protobuf.FireSensoryEventReactionMessage.SealedValue.Empty =>
               Failure(new IllegalStateException("Received Empty of the oneof FireSensoryEventReaction protocol message."))
           }
           time = FiniteDuration(timeout, TimeUnit.MILLISECONDS)
@@ -306,7 +324,7 @@ object ProcessIndexProto {
         } yield StopRetryingInteraction(recipeInstanceId, interactionName)
     }
 
-  implicit def processEventResponseProto(implicit provider: SerializersProvider): ProtoMap[ProcessEventResponse, protobuf.ProcessEventResponse] =
+  implicit def processEventResponseProto(implicit provider: AkkaSerializerProvider): ProtoMap[ProcessEventResponse, protobuf.ProcessEventResponse] =
     new ProtoMap[ProcessEventResponse, protobuf.ProcessEventResponse] {
 
       val companion = protobuf.ProcessEventResponse

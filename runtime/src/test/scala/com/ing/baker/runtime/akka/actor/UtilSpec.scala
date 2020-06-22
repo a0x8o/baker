@@ -3,7 +3,7 @@ package com.ing.baker.runtime.akka.actor
 import scala.collection.immutable.List
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
-import org.scalatest.Matchers._
+import org.scalatest.matchers.should.Matchers._
 
 class UtilSpec extends AkkaTestBase("UtilSpec") {
 
@@ -18,7 +18,7 @@ class UtilSpec extends AkkaTestBase("UtilSpec") {
 
       val futures = fastFutures :+ slowFuture
 
-      val collected = Util.collectFuturesWithin(futures, 1 second, system.scheduler)
+      val collected = Util.collectFuturesWithin(futures, 1.second, system.scheduler)
 
       val expectedResult = List.fill(5)(true)
 

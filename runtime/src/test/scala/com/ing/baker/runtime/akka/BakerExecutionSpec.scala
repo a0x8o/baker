@@ -1,9 +1,11 @@
 package com.ing.baker.runtime.akka
 
+import java.net.MalformedURLException
 import java.util.concurrent.TimeUnit
 import java.util.{Optional, UUID}
 
 import akka.actor.ActorSystem
+import akka.cluster.Cluster
 import akka.persistence.inmemory.extension.{InMemoryJournalStorage, StorageExtension}
 import akka.testkit.{TestDuration, TestKit, TestProbe}
 import com.ing.baker._
@@ -14,14 +16,14 @@ import com.ing.baker.recipe.common.InteractionFailureStrategy.FireEventAfterFail
 import com.ing.baker.recipe.scaladsl.{Event, Ingredient, Interaction, Recipe}
 import com.ing.baker.runtime.common.BakerException._
 import com.ing.baker.runtime.common._
-import com.ing.baker.runtime.scaladsl.{Baker, EventInstance, InteractionInstance}
+import com.ing.baker.runtime.scaladsl.{Baker, EventInstance, InteractionInstance, RecipeEventMetadata}
 import com.ing.baker.types.{CharArray, Int32, PrimitiveValue}
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{Config, ConfigFactory}
 import org.mockito.Matchers.{eq => mockitoEq, _}
 import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
-import org.slf4j.{Logger, LoggerFactory}
-
+import org.mockito.stubbing.Answer
+import org.slf4j.LoggerFactory
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -32,8 +34,6 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
 
   override def actorSystemName = "BakerExecutionSpec"
 
-  val log: Logger = LoggerFactory.getLogger(classOf[BakerExecutionSpec])
-
   before {
     resetMocks()
     setupMockResponse()
@@ -42,6 +42,80 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
     val tp = TestProbe()
     tp.send(StorageExtension(defaultActorSystem).journalStorage, InMemoryJournalStorage.ClearJournal)
     tp.expectMsg(akka.actor.Status.Success(""))
+  }
+
+  "The baker setup" should {
+    "use akka service discovery" in {
+      val config = ConfigFactory.parseString(
+        """
+          |include "baker.conf"
+          |
+          |akka.actor.provider = "cluster"
+          |
+          |baker.actor.provider = "cluster-sharded"
+          |
+          |akka.management {
+          |  cluster.bootstrap {
+          |    contact-point-discovery {
+          |      # For the kubernetes API this value is substributed into the %s in pod-label-selector
+          |      service-name = "baker"
+          |
+          |      # pick the discovery method you'd like to use:
+          |      discovery-method = kubernetes-api
+          |    }
+          |  }
+          |}
+          |""".stripMargin).withFallback(ConfigFactory.load())
+      val setupActorSystem = ActorSystem("setup-actor-system", config)
+      for {
+        exception <- Future.successful {
+          intercept[IllegalArgumentException] {
+            AkkaBaker(config, setupActorSystem)
+          }
+        }
+        _ <- setupActorSystem.terminate()
+      } yield assert(exception.getMessage contains "akka.discovery.kubernetes-api.class must contain field `class` that is a FQN of a `akka.discovery.ServiceDiscovery` implementation")
+    }
+
+    "use akka seed node list" in {
+      val config = ConfigFactory.parseString(
+        """
+          |include "baker.conf"
+          |
+          |akka.actor.provider = "cluster"
+          |
+          |baker.actor.provider = "cluster-sharded"
+          |
+          |baker.cluster.seed-nodes = ["wrong-address"]
+          |
+          |""".stripMargin).withFallback(ConfigFactory.load())
+      val setupActorSystem = ActorSystem("setup-actor-system", config)
+      for {
+        exception <- Future.successful {
+          intercept[MalformedURLException](AkkaBaker(config, setupActorSystem))
+        }
+        _ <- setupActorSystem.terminate()
+      } yield assert(exception.getMessage contains "wrong-address")
+    }
+
+    "fail when no seed nodes or boostrap cluster configuration is set" in {
+      val config = ConfigFactory.parseString(
+        """
+          |include "baker.conf"
+          |
+          |akka.actor.provider = "cluster"
+          |
+          |baker.actor.provider = "cluster-sharded"
+          |
+          |""".stripMargin).withFallback(ConfigFactory.load())
+      val setupActorSystem = ActorSystem("setup-actor-system", config)
+      for {
+        exception <- Future.successful {
+          intercept[IllegalArgumentException](AkkaBaker(config, setupActorSystem))
+        }
+        _ <- setupActorSystem.terminate()
+      } yield assert(exception.getMessage contains "No default service discovery implementation configured in `akka.discovery.method`")
+    }
   }
 
   "The Baker execution engine" should {
@@ -54,12 +128,12 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
       } yield succeed
     }
 
-    "throw an IllegalArgumentException if baking a process with the same identifier twice" in {
+    "throw an ProcessAlreadyExistsException if baking a process with the same identifier twice" in {
       for {
         (baker, recipeId) <- setupBakerWithRecipe("DuplicateIdentifierRecipe")
         id = UUID.randomUUID().toString
         _ <- baker.bake(recipeId, id)
-        _ <- recoverToSucceededIf[IllegalArgumentException] {
+        _ <- recoverToSucceededIf[ProcessAlreadyExistsException] {
           baker.bake(recipeId, id)
         }
       } yield succeed
@@ -90,12 +164,12 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
       }
     }
 
-    "throw a IllegalArgumentException if the event fired is not a valid sensory event" in {
+    "throw a IllegalEventException if the event fired is not a valid sensory event" in {
       for {
         (baker, recipeId) <- setupBakerWithRecipe("NonExistingProcessEventTest")
         recipeInstanceId = UUID.randomUUID().toString
         _ <- baker.bake(recipeId, recipeInstanceId)
-        intercepted <- recoverToExceptionIf[IllegalArgumentException] {
+        intercepted <- recoverToExceptionIf[IllegalEventException] {
           baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(SomeNotDefinedEvent("bla")))
         }
         _ = intercepted.getMessage should startWith("No event with name 'SomeNotDefinedEvent' found in recipe 'NonExistingProcessEventTest")
@@ -123,7 +197,55 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
             "interactionOneOriginalIngredient" -> interactionOneIngredientValue)
     }
 
-    "correctly notify on event" in {
+    "execute an interaction when its ingredient is provided in cluster" in {
+      val recipe =
+        Recipe("IngredientProvidedRecipeCluster")
+          .withInteraction(interactionOne)
+          .withSensoryEvent(initialEvent)
+
+
+      val config: Config = ConfigFactory.parseString(
+        """
+          |include "baker.conf"
+          |
+          |akka {
+          |  actor {
+          |    provider = "cluster"
+          |  }
+          |  remote {
+          |    log-remote-lifecycle-events = off
+          |    netty.tcp {
+          |      hostname = "127.0.0.1"
+          |      port = 2555
+          |    }
+          |  }
+          |
+          |  cluster {
+          |    seed-nodes = ["akka.tcp://remoteTest@127.0.0.1:2555"]
+          |    auto-down-unreachable-after = 10s
+          |  }
+          |}
+        """.stripMargin).withFallback(ConfigFactory.load())
+
+      val baker = AkkaBaker(config, ActorSystem.apply("remoteTest", config))
+
+      for {
+        _ <- baker.addInteractionInstances(mockImplementations)
+        recipeId <- baker.addRecipe(RecipeCompiler.compileRecipe(recipe))
+        _ = when(testInteractionOneMock.apply(anyString(), anyString())).thenReturn(Future.successful(InteractionOneSuccessful(interactionOneIngredientValue)))
+        recipeInstanceId = UUID.randomUUID().toString
+        _ <- baker.bake(recipeId, recipeInstanceId)
+        _ <- baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(EventInstance.unsafeFrom(InitialEvent(initialIngredientValue))))
+        _ = verify(testInteractionOneMock).apply(recipeInstanceId.toString, "initialIngredient")
+        state <- baker.getRecipeInstanceState(recipeInstanceId)
+      } yield
+        state.ingredients shouldBe
+          ingredientMap(
+            "initialIngredient" -> initialIngredientValue,
+            "interactionOneOriginalIngredient" -> interactionOneIngredientValue)
+    }
+
+    "Correctly notify on event" in {
 
       val sensoryEvent = Event(
         name = "sensory-event",
@@ -322,7 +444,7 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
 
     "backwards compatibility in serialization of case class ingredients, THIS TEST IS BROKEN FIX ME!" ignore {
 
-      val isWindows: Boolean = System.getProperty("os.name").toLowerCase.contains("windows")
+      val isWindows: Boolean = sys.props.get("os.name").exists(_.toLowerCase().contains("windows"))
 
       // This tests are broken on windows, requires some investigation
       // Still broken, cause unknown, might be that we stopped being backwards compatible or data got corrupted
@@ -437,7 +559,7 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
               .withPredefinedIngredients(("missingJavaOptional", ingredientValue)))
           .withSensoryEvent(initialEvent)
 
-      val baker = Baker.akka(ConfigFactory.load(), defaultActorSystem)
+      val baker = AkkaBaker(ConfigFactory.load(), defaultActorSystem)
 
       for {
         _ <- baker.addInteractionInstances(mockImplementations)
@@ -476,7 +598,7 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
     }
 
     "notify a registered event listener of events" in {
-      val listenerMock = mock[(String, EventInstance) => Unit]
+      val listenerMock = mock[(RecipeEventMetadata, EventInstance) => Unit]
       when(testInteractionOneMock.apply(anyString(), anyString())).thenReturn(Future.successful(InteractionOneSuccessful(interactionOneIngredientValue)))
       val recipe =
         Recipe("EventListenerRecipe")
@@ -489,8 +611,8 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
         recipeInstanceId = UUID.randomUUID().toString
         _ <- baker.bake(recipeId, recipeInstanceId)
         _ <- baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))
-        _ = verify(listenerMock).apply(mockitoEq(recipeInstanceId.toString), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))))
-        _ = verify(listenerMock).apply(mockitoEq(recipeInstanceId.toString), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InteractionOneSuccessful(interactionOneIngredientValue)))))
+        _ = verify(listenerMock).apply(mockitoEq(RecipeEventMetadata(recipeId, recipe.name, recipeInstanceId.toString)), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))))
+        _ = verify(listenerMock).apply(mockitoEq(RecipeEventMetadata(recipeId, recipe.name, recipeInstanceId.toString)), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InteractionOneSuccessful(interactionOneIngredientValue)))))
       } yield succeed
     }
 
@@ -846,9 +968,6 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
         _ <- baker.bake(recipeId, recipeInstanceId)
         //Handle first event
         _ <- baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))
-        _ <- Future {
-          Thread.sleep(50)
-        }
         state <- baker.getRecipeInstanceState(recipeInstanceId)
       } yield state.eventNames should contain(interactionOne.retryExhaustedEventName)
     }
@@ -867,9 +986,6 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
         _ <- baker.bake(recipeId, recipeInstanceId)
         //Handle first event
         _ <- baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))
-        _ <- Future {
-          Thread.sleep(50)
-        }
         //Since the defaultEventExhaustedName is set the retryExhaustedEventName of interactionOne will be picked.
         state <- baker.getRecipeInstanceState(recipeInstanceId)
       } yield state.eventNames should not contain interactionOne.retryExhaustedEventName
@@ -886,7 +1002,7 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
       for {
         (baker, recipeId) <- setupBakerWithRecipe(recipe, mockImplementations)
 
-        listenerMock = mock[(String, EventInstance) => Unit]
+        listenerMock = mock[(RecipeEventMetadata, EventInstance) => Unit]
         _ <- baker.registerEventListener("ImmediateFailureEvent", listenerMock)
 
         recipeInstanceId = UUID.randomUUID().toString
@@ -894,11 +1010,8 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
 
         //Handle first event
         _ <- baker.fireEventAndResolveWhenCompleted(recipeInstanceId, EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))
-        _ <- Future {
-          Thread.sleep(50)
-        }
-        _ = verify(listenerMock).apply(mockitoEq(recipeInstanceId.toString), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))))
-        _ = verify(listenerMock).apply(mockitoEq(recipeInstanceId.toString), argThat(new RuntimeEventMatcher(EventInstance(interactionOne.retryExhaustedEventName, Map.empty))))
+        _ = verify(listenerMock).apply(mockitoEq(RecipeEventMetadata(recipeId, recipe.name, recipeInstanceId.toString)), argThat(new RuntimeEventMatcher(EventInstance.unsafeFrom(InitialEvent(initialIngredientValue)))))
+        _ = verify(listenerMock).apply(mockitoEq(RecipeEventMetadata(recipeId, recipe.name, recipeInstanceId.toString)), argThat(new RuntimeEventMatcher(EventInstance(interactionOne.retryExhaustedEventName, Map.empty))))
 
         state <- baker.getRecipeInstanceState(recipeInstanceId)
       } yield state.eventNames should contain(interactionOne.retryExhaustedEventName)
@@ -1039,7 +1152,7 @@ class BakerExecutionSpec extends BakerRuntimeTestBase {
 
       def second(recipeId: String) = {
         val system2 = ActorSystem("persistenceTest2", localLevelDBConfig("persistenceTest2"))
-        val baker2 = Baker.akka(ConfigFactory.load(), system2)
+        val baker2 = AkkaBaker(ConfigFactory.load(), system2)
         (for {
           _ <- baker2.addInteractionInstances(mockImplementations)
           state <- baker2.getRecipeInstanceState(recipeInstanceId)

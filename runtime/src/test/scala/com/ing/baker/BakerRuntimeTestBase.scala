@@ -1,20 +1,26 @@
 package com.ing.baker
 
+import java.nio.file.Paths
+import java.util.UUID
+
 import akka.actor.ActorSystem
 import akka.testkit.TestKit
 import com.ing.baker.compiler.RecipeCompiler
 import com.ing.baker.il.CompiledRecipe
-import com.ing.baker.recipe.TestRecipe.{ fireTwoEventsInteraction, _ }
-import com.ing.baker.recipe.{ CaseClassIngredient, common }
-import com.ing.baker.runtime.scaladsl.{ Baker, EventInstance, InteractionInstance }
-import com.ing.baker.types.{ Converters, Value }
-import com.typesafe.config.{ Config, ConfigFactory }
-import java.nio.file.Paths
-import java.util.UUID
+import com.ing.baker.recipe.CaseClassIngredient
+import com.ing.baker.recipe.TestRecipe.{fireTwoEventsInteraction, _}
+import com.ing.baker.recipe.common.Recipe
+import com.ing.baker.runtime.akka.AkkaBaker
+import com.ing.baker.runtime.scaladsl.{Baker, EventInstance, InteractionInstance}
+import com.ing.baker.types.{Converters, Value}
+import com.typesafe.config.{Config, ConfigFactory}
 import org.mockito.Matchers._
 import org.mockito.Mockito._
-import org.scalatest._
-import org.scalatest.mockito.MockitoSugar
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.wordspec.AsyncWordSpecLike
+import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll}
+import org.scalatestplus.mockito.MockitoSugar
+
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -103,9 +109,9 @@ trait BakerRuntimeTestBase
       testProvidesNothingInteractionMock).map(InteractionInstance.unsafeFrom(_))
 
   def writeRecipeToSVGFile(recipe: CompiledRecipe) = {
-    import guru.nidi.graphviz.engine.{ Format, Graphviz }
+    import guru.nidi.graphviz.engine.{Format, Graphviz}
     import guru.nidi.graphviz.parse.Parser
-    val g = Parser.read(recipe.getRecipeVisualization)
+    val g = (new Parser()).read(recipe.getRecipeVisualization)
     Graphviz.fromGraph(g).render(Format.SVG).toFile(Paths.get(recipe.name).toFile)
   }
 
@@ -163,9 +169,9 @@ trait BakerRuntimeTestBase
       s"""
          |akka {
          |
-       |  actor.provider = "akka.cluster.ClusterActorRefProvider"
+         |  actor.provider = "akka.cluster.ClusterActorRefProvider"
          |
-       |  remote {
+         |  remote {
          |    netty.tcp {
          |      hostname = localhost
          |      port = $port
@@ -173,7 +179,7 @@ trait BakerRuntimeTestBase
          |  }
          |}
          |
-       |baker {
+         |baker {
          |  actor.provider = "cluster-sharded"
          |  cluster.seed-nodes = ["akka.tcp://$actorSystemName@localhost:$port"]
          |}
@@ -202,9 +208,9 @@ trait BakerRuntimeTestBase
     setupBakerWithRecipe(recipe, mockImplementations)(actorSystem)
   }
 
-  protected def setupBakerWithRecipe(recipe: common.Recipe, implementations: Seq[InteractionInstance])
+  protected def setupBakerWithRecipe(recipe: Recipe, implementations: Seq[InteractionInstance])
                                     (implicit actorSystem: ActorSystem): Future[(Baker, String)] = {
-    val baker = Baker.akka(ConfigFactory.load(), actorSystem)
+    val baker = AkkaBaker(ConfigFactory.load(), actorSystem)
     baker.addInteractionInstances(implementations).flatMap { _ =>
       baker.addRecipe(RecipeCompiler.compileRecipe(recipe)).map(baker -> _)(actorSystem.dispatcher)
     }
@@ -212,7 +218,7 @@ trait BakerRuntimeTestBase
 
   protected def setupBakerWithNoRecipe()(implicit actorSystem: ActorSystem): Future[Baker] = {
     setupMockResponse()
-    val baker = Baker.akka(ConfigFactory.load(), actorSystem)
+    val baker = AkkaBaker(ConfigFactory.load(), actorSystem)
     baker.addInteractionInstances(mockImplementations).map { _ => baker }
   }
 

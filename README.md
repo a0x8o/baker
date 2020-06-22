@@ -19,7 +19,8 @@ An introductory presentation of Baker: [Baker talk @ Amsterdam.Scala meetup](htt
 
 A talk about Baker at the Scale By the Bay 2017 conference: [Declare, verify and execute microservices-based process flows](https://www.youtube.com/watch?v=0bWQwUmeXHU).
 
-An example web-shop recipe you can find at the [examples sub-project](https://github.com/ing-bank/baker/tree/master/examples/src/main/scala/webshop/webservice) 
+An example web-shop recipe you can find at the [examples sub-project](https://github.com/ing-bank/baker/tree/master/examples/src/main/scala/webshop/webservice).
+Java developers new to Baker can use this [workshop](https://github.com/nikolakasev/workshop-baker) to get familiar with the library by following and getting the unit tests green.
 
 WebShop Recipe:
 ```scala
@@ -73,9 +74,9 @@ Applying Baker will only be successful if you make sure that:
 To get started with SBT, simply add the following to your build.sbt file:
 
 ```
-libraryDependencies += "com.ing.baker" %% "baker-recipe-dsl" % "3.0.0-RC"
-libraryDependencies += "com.ing.baker" %% "baker-runtime" % "3.0.0-RC"
-libraryDependencies += "com.ing.baker" %% "baker-compiler" % "3.0.0-RC"
+libraryDependencies += "com.ing.baker" %% "baker-recipe-dsl" % "3.0.1"
+libraryDependencies += "com.ing.baker" %% "baker-runtime" % "3.0.1"
+libraryDependencies += "com.ing.baker" %% "baker-compiler" % "3.0.1"
 ```
 
 From 1.3.x to 2.0.x we cross compile to both scala 2.11 and 2.12. 

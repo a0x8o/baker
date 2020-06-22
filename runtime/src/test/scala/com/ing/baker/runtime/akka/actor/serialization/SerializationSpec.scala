@@ -17,24 +17,24 @@ import com.ing.baker.runtime.akka.actor.recipe_manager.RecipeManager.RecipeAdded
 import com.ing.baker.runtime.akka.actor.recipe_manager.RecipeManagerProto._
 import com.ing.baker.runtime.akka.actor.recipe_manager.RecipeManagerProtocol.GetRecipe
 import com.ing.baker.runtime.akka.actor.recipe_manager.{RecipeManager, RecipeManagerProtocol}
-import com.ing.baker.runtime.akka.actor.serialization.Encryption.{AESEncryption, NoEncryption}
-import com.ing.baker.runtime.akka.actor.serialization.ProtoMap.{ctxFromProto, ctxToProto}
 import com.ing.baker.runtime.common.SensoryEventStatus
 import com.ing.baker.runtime.scaladsl.{EventInstance, EventMoment, RecipeInstanceState, SensoryEventResult}
+import com.ing.baker.runtime.serialization.Encryption.{AESEncryption, NoEncryption}
+import com.ing.baker.runtime.serialization.ProtoMap.{ctxFromProto, ctxToProto}
 import com.ing.baker.types.modules.PrimitiveModuleSpec._
 import com.ing.baker.types.{Value, _}
 import com.ing.baker.{AllTypeRecipe, types}
 import org.scalacheck.Prop.forAll
 import org.scalacheck.Test.Parameters.defaultVerbose
 import org.scalacheck._
-import org.scalatest.FunSuiteLike
-import org.scalatest.prop.Checkers
+import org.scalatest.funsuite.AnyFunSuiteLike
+import org.scalatestplus.scalacheck.Checkers
 
 import scala.concurrent.duration._
 import scala.reflect.ClassTag
 import scala.util.Success
 
-class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec")) with FunSuiteLike with Checkers {
+class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec")) with AnyFunSuiteLike with Checkers {
 
   val serializer: BakerTypedProtobufSerializer =
     SerializationExtension
@@ -42,13 +42,11 @@ class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec
       .serializerByIdentity(101)
       .asInstanceOf[BakerTypedProtobufSerializer]
 
-  import serializer.serializersProvider
-
   def checkFor[A <: AnyRef]: CheckFor[A] = new CheckFor[A]
 
   class CheckFor[A <: AnyRef]() {
 
-    def run[P <: scalapb.GeneratedMessage with scalapb.Message[P]](implicit ev: ProtoMap[A, P], gen: Gen[A], typeTag: ClassTag[A]): Unit = {
+    def run(implicit gen: Gen[A], typeTag: ClassTag[A]): Unit = {
       test(s"${typeTag.runtimeClass.getName} typed serialization") {
         check(forAll(gen) { m =>
           m === serializer.fromBinary(serializer.toBinary(m), serializer.manifest(m))
@@ -91,7 +89,7 @@ class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec
     val serialized = serializer.toBinary(m)
     val deserialized = serializer.fromBinary(serialized, serializer.manifest(m))
     deserialized === m &&
-    ctxFromProto(ctxToProto(m)) === Success(m)
+      ctxFromProto(ctxToProto(m)) === Success(m)
   }
 
   checkFor[ProcessIndexProtocol.Index].run
@@ -198,8 +196,8 @@ class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec
     val encryption = new AESEncryption(List.fill(16)("0").mkString)
     val withEncryption = serializer.serializersProvider.copy(encryption = encryption)
     val withoutEncryption = serializer.serializersProvider.copy(encryption = NoEncryption)
-    val mapperEncryption = ProtoMap.anyRefMapping(withEncryption)
-    val mapperNoEncryption = ProtoMap.anyRefMapping(withoutEncryption)
+    val mapperEncryption = SerializedDataProto.akkaAnyRefMapping(withEncryption)
+    val mapperNoEncryption = SerializedDataProto.akkaAnyRefMapping(withoutEncryption)
 
     val protoEn = mapperEncryption.toProto(data)
     val protoNe = mapperNoEncryption.toProto(data)
@@ -219,8 +217,8 @@ class SerializationSpec extends TestKit(ActorSystem("BakerProtobufSerializerSpec
     val encryption = new AESEncryption(List.fill(16)("0").mkString)
     val withEncryption = serializer.serializersProvider.copy(encryption = encryption)
     val withoutEncryption = serializer.serializersProvider.copy(encryption = NoEncryption)
-    val mapperEncryption = ProtoMap.anyRefMapping(withEncryption)
-    val mapperNoEncryption = ProtoMap.anyRefMapping(withoutEncryption)
+    val mapperEncryption = SerializedDataProto.akkaAnyRefMapping(withEncryption)
+    val mapperNoEncryption = SerializedDataProto.akkaAnyRefMapping(withoutEncryption)
 
     val protoEn = mapperEncryption.toProto(data)
     val protoNe = mapperNoEncryption.toProto(data)
@@ -358,7 +356,9 @@ object SerializationSpec {
     } yield CreateProcess(recipeId, recipeInstanceId)
 
     class SimpleActor extends Actor {
-      override def receive: Receive = { case _ => () }
+      override def receive: Receive = {
+        case _ => ()
+      }
     }
 
     val waitForRetriesGen = Gen.oneOf(true, false)
@@ -400,7 +400,7 @@ object SerializationSpec {
     } yield StopRetryingInteraction(recipeInstanceId, interactionName)
 
     val sensoryEventStatusGen: Gen[SensoryEventStatus] = Gen.oneOf(
-      SensoryEventStatus.AlreadyReceived ,
+      SensoryEventStatus.AlreadyReceived,
       SensoryEventStatus.Completed,
       SensoryEventStatus.FiringLimitMet,
       SensoryEventStatus.Received,
@@ -409,9 +409,9 @@ object SerializationSpec {
     )
 
     val eventResultGen: Gen[SensoryEventResult] = for {
-        status <- sensoryEventStatusGen
-        events <- Gen.listOf(Gen.alphaStr)
-        ingredients <- Gen.listOf(Runtime.ingredientsGen)
+      status <- sensoryEventStatusGen
+      events <- Gen.listOf(Gen.alphaStr)
+      ingredients <- Gen.listOf(Runtime.ingredientsGen)
     } yield SensoryEventResult(status, events, ingredients.toMap)
 
     implicit val processEventResponse: Gen[ProcessEventResponse] = for {
