@@ -1,0 +1,28 @@
+.text-inside-grid {
+  height: 100%;
+  left: 5px;
+  width: 100%;
+}
+
+.ingredient-value-json {
+  font-size: 10px;
+}
+.scroll-viewport {
+  height: 100%;
+  width: 100%;
+}
+
+.mat-expansion-panel-header-description {
+  justify-content: end;
+}
+
+.mat-tab-group, .mat-tab-body, /deep/.mat-tab-body-wrapper {
+  height: calc(100% - 90px);
+}
+.mat-table {
+  width: 95%;
+}
+
+.mat-form-field {
+  width: 100%;
+}

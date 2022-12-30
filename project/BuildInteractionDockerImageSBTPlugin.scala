@@ -1,4 +1,4 @@
-package baas.sbt
+package bakery.sbt
 
 import java.nio.charset.Charset
 
@@ -74,19 +74,20 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
         Project.extract(state).appendWithSession(Seq(
           name := arguments.name,
           libraryDependencies ++= moduleID.toSeq,
-          packageName in Docker := arguments.name,
-          version in ThisBuild := moduleID.map(_.revision).getOrElse((version in ThisBuild).value),
-          javaOptions in Universal += arguments.interactions.mkString(","),
-          livenessProbe in kube := NoProbe,
-          sourceGenerators in Compile += Def.task {
+          Docker / packageName  := arguments.name,
+          ThisBuild / version := moduleID.map(_.revision).getOrElse((ThisBuild / version ).value),
+          Universal / javaOptions  += arguments.interactions.mkString(","),
+          kube / livenessProbe := NoProbe,
+          dockerBaseImage := "adoptopenjdk/openjdk11",
+          Compile / sourceGenerators  += Def.task {
             val mainClassName =
-              (mainClass in Compile).value.getOrElse(throw new MessageOnlyException("mainClass in Compile is required"))
+              (Compile / mainClass).value.getOrElse(throw new MessageOnlyException("mainClass in Compile is required"))
 
             val pathList = mainClassName.split("\\.")
 
             val file =
               (pathList.dropRight(1) :+ pathList.last + ".scala")
-                .foldLeft((sourceManaged in Compile).value) {
+                .foldLeft((Compile / sourceManaged).value) {
                   case (file, subPath) => file / subPath
                 }
 
@@ -98,8 +99,8 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
         ), state)
 
       val commandName = arguments.publish match {
-        case "local" => "docker:publishLocal"
-        case _ => "docker:publish"
+        case "local" => "Docker/publishLocal"
+        case _ => "Docker/publish"
       }
       val updatedState = Command.process(commandName, stateWithNewDependency)
       Command.process("kubeyml:gen", updatedState)
@@ -112,17 +113,16 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
 
   override lazy val projectSettings: Seq[Def.Setting[_]] = Seq(
     mainClassBody := None,
-    mainClass in Compile := Some("com.ing.baker.baas.Main"),
+    Compile / mainClass := Some("com.ing.bakery.Main"),
     commands += buildDockerCommand
   )
 
   private val mainClassBodyDefault =
     """
-      |package com.ing.baker.baas
+      |package com.ing.bakery
       |
-      |import com.ing.baker.baas.interaction.RemoteInteractionLoader
+      |import com.ing.bakery.interaction.RemoteInteractionLoader
       |import com.ing.baker.runtime.scaladsl.InteractionInstance
-      |import kamon.Kamon
       |
       |import scala.concurrent.ExecutionContext.Implicits.global
       |
@@ -130,7 +130,6 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
       |  * Expects single argument containing full classpath entry point for interaction
       |  */
       |object Main extends App {
-      |  Kamon.init()
       |
       |  private def runApp(classNames: String): Unit =
       |    try {
@@ -145,24 +144,24 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
       |    }
       |
       |
-      |  args.headOption.map(runApp).getOrElse(throw new IllegalAccessException("Expected class name a parameter"))
+      |  args.headOption.map(runApp).getOrElse(throw new IllegalAccessException("Expected class name as a parameter"))
       |}
       |""".stripMargin
 
   private val mainClassBodySpringDefault =
     """
-      |package com.ing.baker.baas
+      |package com.ing.bakery
       |
       |import java.util
       |
-      |import com.ing.baker.baas.interaction.RemoteInteractionLoader
+      |import com.ing.bakery.interaction.RemoteInteractionLoader
       |import com.ing.baker.recipe.javadsl.Interaction
       |import com.ing.baker.runtime.scaladsl.InteractionInstance
       |import com.typesafe.scalalogging.LazyLogging
-      |import kamon.Kamon
       |import org.springframework.context.annotation.AnnotationConfigApplicationContext
       |
       |import scala.collection.JavaConverters._
+      |import scala.annotation.nowarn
       |import scala.concurrent.ExecutionContext.Implicits.global
       |
       |/**
@@ -170,8 +169,7 @@ object BuildInteractionDockerImageSBTPlugin extends sbt.AutoPlugin {
       | */
       |object Main extends App with LazyLogging{
       |
-      |  Kamon.init()
-      |
+      |  @nowarn
       |  def getImplementations(configurationClassString: String) : List[InteractionInstance] = {
       |    val configClass = Class.forName(configurationClassString)
       |    logger.info("Class found: " + configClass)

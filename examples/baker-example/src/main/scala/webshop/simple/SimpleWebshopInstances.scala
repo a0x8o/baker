@@ -1,16 +1,19 @@
 package webshop.simple
 
-import com.ing.baker.runtime.scaladsl.{EventInstance, IngredientInstance, InteractionInstance}
+import com.ing.baker.runtime.scaladsl.{EventInstance, IngredientInstance, InteractionInstance, InteractionInstanceInput}
 import com.ing.baker.types.{CharArray, ListType, ListValue, PrimitiveValue}
 
+import scala.collection.immutable.Seq
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 
 object SimpleWebshopInstances {
 
-  val ReserveItemsInstance = InteractionInstance(
+  val ReserveItemsInstance: InteractionInstance = InteractionInstance(
     name = SimpleWebshopRecipe.Interactions.ReserveItems.name,
-    input = Seq(CharArray, ListType(CharArray)),
+    input = Seq(
+      InteractionInstanceInput(Option.empty, CharArray), // orderId
+      InteractionInstanceInput(Option.empty, ListType(CharArray))), // items
     run = handleReserveItems
   )
 

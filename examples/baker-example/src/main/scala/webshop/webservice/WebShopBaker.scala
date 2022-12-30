@@ -1,13 +1,14 @@
 package webshop.webservice
 
 import java.util.UUID
-
 import cats.effect.{ContextShift, IO, Timer}
 import com.ing.baker.compiler.RecipeCompiler
 import com.ing.baker.il.CompiledRecipe
+import com.ing.baker.runtime.common.RecipeRecord
 import com.ing.baker.runtime.scaladsl.{Baker, EventInstance, InteractionInstance}
 import org.log4s.{Logger, getLogger}
-import webshop.webservice.CheckoutFlowIngredients.{Item, OrderId, PaymentInformation, ShippingAddress}
+import webshop.webservice.recipe.CheckoutFlowIngredients.{Item, PaymentInformation, ShippingAddress}
+import webshop.webservice.recipe.{CheckoutFlowEvents, CheckoutFlowRecipe, OrderStatus}
 
 import scala.concurrent.ExecutionContext
 
@@ -22,12 +23,7 @@ object WebShopBaker {
     implicit val cs = IO.contextShift(ec)
 
     IO.fromFuture(IO(for {
-      _ <- baker.addInteractionInstances(Seq(
-        InteractionInstance.unsafeFrom(new ReserveItemsInstance()),
-        InteractionInstance.unsafeFrom(new MakePaymentInstance()),
-        InteractionInstance.unsafeFrom(new ShipItemsInstance())
-      ))
-      checkoutRecipeId <- baker.addRecipe(checkoutFlowCompiledRecipe)
+      checkoutRecipeId <- baker.addRecipe(RecipeRecord.of(checkoutFlowCompiledRecipe))
       _ = println(Console.GREEN + "V3 Checkout Recipe ID :: " + checkoutRecipeId + Console.RESET)
       _ <- baker.registerEventListener((name, event) => {
         logger.info(s"$name => ${event.providedIngredients}")
@@ -45,7 +41,7 @@ class WebShopBaker(baker: Baker, checkoutRecipeId: String)(implicit ec: Executio
     IO.fromFuture(IO {
       val orderId: String = UUID.randomUUID().toString
       val event = EventInstance.unsafeFrom(
-        CheckoutFlowEvents.OrderPlaced(OrderId(orderId), items.map(Item)))
+        CheckoutFlowEvents.OrderPlaced(items.map(Item)))
       for {
         _ <- baker.bake(checkoutRecipeId, orderId)
         status <- baker.fireEventAndResolveWhenReceived(orderId, event)

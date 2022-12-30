@@ -9,21 +9,21 @@ object Publish {
   lazy val settings =
     if (sys.env.contains("FEEDURL")) StableToAzureFeed
     else if ( (sys.env.contains("USERNAME"))) ReleaseToSonatype
-    else SuppressJavaDocsAndSources
+    else SuppressJavaDocs
 
   import aether.AetherKeys._
 
-  val SuppressJavaDocsAndSources = Seq(
-    sources in doc := Seq(),
-    publishArtifact in packageDoc := false,
-    publishArtifact in packageSrc := false
+  val SuppressJavaDocs = Seq(
+    doc / sources  := Seq(),
+    packageDoc / publishArtifact  := false,
+    packageSrc / publishArtifact  := true
   )
 
   val StableToAzureFeed = Seq(
     credentials += Credentials(Path.userHome / ".credentials"),
     publishTo := Some("pkgs.dev.azure.com" at sys.env.getOrElse("FEEDURL", "")),
     publishMavenStyle := true,
-    logLevel in aetherDeploy := Level.Info
+    aetherDeploy / logLevel  := Level.Info
   )
 
   protected def isSnapshot(s: String) = s.trim endsWith "SNAPSHOT"
@@ -64,12 +64,13 @@ object Publish {
     ),
     publishMavenStyle := true,
     publishTo := version((v: String) => Some(if (isSnapshot(v)) ossSnapshots else ossStaging)).value,
-    publishArtifact in Test := false,
-    publishArtifact in packageDoc := true,
-    publishArtifact in packageSrc := true,
+    Test / publishArtifact := false,
+    packageDoc / publishArtifact := true,
+    packageSrc / publishArtifact := true,
     pomIncludeRepository := (_ => false),
     releaseCrossBuild := true,
     releaseProcess := Seq[ReleaseStep](
+      releaseStepCommand("sonatypeDropAll"),
       checkSnapshotDependencies,
       inquireVersions,
       runClean,
