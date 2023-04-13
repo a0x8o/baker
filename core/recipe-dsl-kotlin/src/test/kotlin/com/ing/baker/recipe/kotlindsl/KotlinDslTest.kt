@@ -1,5 +1,7 @@
 package com.ing.baker.recipe.kotlindsl
 
+import com.ing.baker.recipe.annotations.FiresEvent
+import com.ing.baker.recipe.annotations.RequiresIngredient
 import com.ing.baker.recipe.common.InteractionFailureStrategy
 import com.ing.baker.recipe.common.InteractionFailureStrategy.BlockInteraction
 import com.ing.baker.recipe.javadsl.Interaction
@@ -186,7 +188,10 @@ class KotlinDslTest {
             assertEquals(Event("Char", listOf(), Optional.empty()), eventOutputTransformers().toList().get(0)._1)
             assertEquals(EventOutputTransformer("foo", emptyMap()), eventOutputTransformers().toList().get(0)._2)
             assertEquals(Event("Boolean", listOf(), Optional.empty()), eventOutputTransformers().toList().get(1)._1)
-            assertEquals(EventOutputTransformer("AnotherBoolean", mapOf("foo" to "bar", "this" to "that")), eventOutputTransformers().toList().get(1)._2)
+            assertEquals(
+                EventOutputTransformer("AnotherBoolean", mapOf("foo" to "bar", "this" to "that")),
+                eventOutputTransformers().toList().get(1)._2
+            )
 
             assertEquals(2, overriddenIngredientNames().size())
             assertEquals("yolo", overriddenIngredientNames().get("foo").get())
@@ -269,6 +274,91 @@ class KotlinDslTest {
         }
     }
 
+    @Test
+    fun `create a recipe with interactions that use annotations`() {
+        val recipe = recipe("recipe with interactions that use annotations") {
+            interaction<JavaInteraction>()
+            interaction<KotlinInteractionWithAnnotations>()
+        }
+
+        with(recipe.interactions().toList().apply(0)) {
+            assertEquals("JavaInteraction", name())
+
+            assertEquals(2, inputIngredients().size())
+            assertEquals(inputIngredients().toList().apply(0).name(), "orderId")
+            assertEquals(inputIngredients().toList().apply(1).name(), "items")
+
+            assertEquals(2, output().size())
+            with(output().toList().apply(0)) {
+                assertEquals("ItemsReserved", name())
+                assertEquals(1, providedIngredients().size())
+                assertEquals("reservedItems", providedIngredients().toList().apply(0).name())
+            }
+            with(output().toList().apply(1)) {
+                assertEquals("OrderHadUnavailableItems", name())
+                assertEquals(1, providedIngredients().size())
+                assertEquals("unavailableItems", providedIngredients().toList().apply(0).name())
+            }
+        }
+
+        with(recipe.interactions().toList().apply(1)) {
+            assertEquals("KotlinInteractionWithAnnotations", name())
+
+            assertEquals(1, inputIngredients().size())
+            assertEquals(inputIngredients().toList().apply(0).name(), "id")
+
+            assertEquals(2, output().size())
+            with(output().toList().apply(0)) {
+                assertEquals("Person", name())
+                assertEquals(2, providedIngredients().size())
+                assertEquals("name", providedIngredients().toList().apply(0).name())
+                assertEquals("age", providedIngredients().toList().apply(1).name())
+            }
+            with(output().toList().apply(1)) {
+                assertEquals("Error", name())
+                assertEquals(1, providedIngredients().size())
+                assertEquals("reason", providedIngredients().toList().apply(0).name())
+            }
+        }
+    }
+
+
+    @Test
+    fun `create a recipe with checkpoint evenst`() {
+        val recipe = recipe("RecipeWithCheckpointEvent"){
+            checkpointEvent("Success"){
+                requiredEvents {
+                    event<Interactions.MakePayment.PaymentSuccessful>()
+                    event("myEvent")
+                }
+
+                requiredOneOfEvents {
+                    event<Ingredients.PaymentInformation>()
+                    event("SomeEvent")
+                }
+            }
+        }
+
+        with(recipe) {
+            assertEquals("RecipeWithCheckpointEvent", name())
+            assertEquals(Option.empty<FiniteDuration>(), retentionPeriod())
+            assertEquals(Option.empty<FiniteDuration>(), eventReceivePeriod())
+            assertEquals(BlockInteraction::class.java, defaultFailureStrategy().javaClass)
+            assertEquals(1, checkpointEvents().size())
+            assertEquals("Success", checkpointEvents().get(0).name())
+            assertEquals(2, checkpointEvents().get(0).requiredEvents().size())
+            assertEquals("PaymentSuccessful", checkpointEvents().get(0).requiredEvents().get(0))
+            assertEquals("myEvent", checkpointEvents().get(0).requiredEvents().get(1))
+            assertEquals(1, checkpointEvents().get(0).requiredOneOfEvents().size())
+            assertEquals(2, checkpointEvents().get(0).requiredOneOfEvents().get(0).size())
+            assertEquals("PaymentInformation", checkpointEvents().get(0).requiredOneOfEvents().get(0).get(0))
+            assertEquals("SomeEvent", checkpointEvents().get(0).requiredOneOfEvents().get(0).get(1))
+            assertTrue(sensoryEvents().isEmpty)
+            assertTrue(interactions().isEmpty)
+        }
+    }
+
+
     object Events {
         class OrderPlaced(val items: List<Ingredients.Item>)
         class PaymentInformationReceived(val paymentInformation: Ingredients.PaymentInformation)
@@ -315,7 +405,17 @@ class KotlinDslTest {
 
             fun apply(items: List<Ingredients.Item>): ReserveItemsOutcome
         }
+    }
 
+    interface KotlinInteractionWithAnnotations : Interaction {
+        interface Outcome
+        data class Person(val name: String, val age: Int): Outcome
+        data class Error(val reason: String): Outcome
+
+        @FiresEvent(oneOf = [Person::class, Error::class])
+        fun apply(
+            @RequiresIngredient("id") id: String,
+        ): Outcome
     }
 
     private fun <T> Seq<T>.get(index: Int): T = apply(index)

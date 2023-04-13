@@ -1,10 +1,13 @@
 package com.ing.baker.recipe.kotlindsl
 
+import com.ing.baker.recipe.annotations.FiresEvent
 import com.ing.baker.recipe.common.InteractionFailureStrategy.BlockInteraction
+import com.ing.baker.recipe.javadsl.InteractionDescriptor
 import com.ing.baker.recipe.javadsl.InteractionFailureStrategy
 import scala.Option
 import java.util.*
 import kotlin.reflect.KClass
+import kotlin.reflect.KFunction
 import kotlin.reflect.full.functions
 import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.javaType
@@ -48,6 +51,11 @@ class RecipeBuilder(private val name: String) {
      */
     var retentionPeriod: Duration? = null
 
+    /**
+     * Collects events and fires and new event when conditions are met.
+     */
+    private val checkpointEvents: MutableSet<CheckPointEvent> = mutableSetOf()
+
     @PublishedApi
     internal val interactions: MutableSet<Interaction> = mutableSetOf()
 
@@ -58,6 +66,13 @@ class RecipeBuilder(private val name: String) {
      */
     fun sensoryEvents(init: SensoryEventsBuilder.() -> Unit) {
         sensoryEvents.addAll(SensoryEventsBuilder().apply(init).build())
+    }
+
+    /**
+     * Registers checkpoint events to the recipe via the [CheckpointEventBuilder] receiver.
+     */
+    fun checkpointEvent(eventName: String, init: CheckpointEventBuilder.() -> Unit) {
+        checkpointEvents.add(CheckpointEventBuilder().apply(init).build(eventName))
     }
 
     /**
@@ -102,7 +117,8 @@ class RecipeBuilder(private val name: String) {
         sensoryEvents.toList(),
         defaultFailureStrategy.build(),
         Optional.ofNullable(eventReceivePeriod?.toJavaDuration()),
-        Optional.ofNullable(retentionPeriod?.toJavaDuration())
+        Optional.ofNullable(retentionPeriod?.toJavaDuration()),
+        checkpointEvents
     )
 }
 
@@ -131,19 +147,8 @@ class InteractionBuilder(private val interactionClass: KClass<out com.ing.baker.
 
     private val preDefinedIngredients = mutableMapOf<String, Any>()
     private val ingredientNameOverrides = mutableMapOf<String, String>()
-    private val events = mutableSetOf<KClass<*>>()
     private val requiredEvents: MutableSet<String> = mutableSetOf()
     private val requiredOneOfEvents: MutableSet<Set<String>> = mutableSetOf()
-
-    init {
-        val applyFn = interactionClass.interactionFunction()
-        val sealedSubclasses = (applyFn.returnType.classifier as KClass<*>).sealedSubclasses
-        if (sealedSubclasses.isNotEmpty()) {
-            events.addAll(sealedSubclasses.toSet())
-        } else {
-            events.addAll(setOf(applyFn.returnType.classifier as KClass<*>))
-        }
-    }
 
     /**
      * All events specified in this block have to be available for the interaction to be executed (AND precondition).
@@ -222,27 +227,51 @@ class InteractionBuilder(private val interactionClass: KClass<out com.ing.baker.
 
     @PublishedApi
     internal fun build(): Interaction {
-        val inputIngredients = interactionClass.interactionFunction().parameters.drop(1)
-            .map { Ingredient(it.name, it.type.javaType) }
-            .toSet()
-
-        val outputEvents: Set<Event> = events.map { it.toEvent() }.toSet()
-
         val eventTransformationsInput: Map<Event, EventOutputTransformer> =
             eventTransformations.associate { it.from.toEvent() to EventOutputTransformer(it.to, it.ingredientRenames) }
 
-        return Interaction(
-            name,
-            inputIngredients,
-            outputEvents,
-            requiredEvents,
-            requiredOneOfEvents,
-            preDefinedIngredients,
-            ingredientNameOverrides,
-            eventTransformationsInput,
-            Optional.ofNullable(maximumInteractionCount),
-            Optional.ofNullable(failureStrategy?.build())
-        )
+        return if (interactionClass.interactionFunction().hasFiresEventAnnotation()) {
+            Interaction.of(
+                name,
+                InteractionDescriptor.of(interactionClass.java),
+                requiredEvents,
+                requiredOneOfEvents,
+                preDefinedIngredients,
+                ingredientNameOverrides,
+                eventTransformationsInput,
+                Optional.ofNullable(maximumInteractionCount),
+                Optional.ofNullable(failureStrategy?.build())
+            )
+        } else {
+            val inputIngredients = interactionClass.interactionFunction().parameters.drop(1)
+                .map { Ingredient(it.name, it.type.javaType) }
+                .toSet()
+
+            Interaction.of(
+                name,
+                interactionClass.simpleName,
+                inputIngredients,
+                extractOutputEvents(),
+                requiredEvents,
+                requiredOneOfEvents,
+                preDefinedIngredients,
+                ingredientNameOverrides,
+                eventTransformationsInput,
+                Optional.ofNullable(maximumInteractionCount),
+                Optional.ofNullable(failureStrategy?.build())
+            )
+        }
+    }
+
+    private fun extractOutputEvents(): Set<Event> {
+        val classifier = interactionClass.interactionFunction().returnType.classifier as KClass<*>
+        return with(classifier) {
+            if (sealedSubclasses.isNotEmpty()) {
+                sealedSubclasses.map { it.toEvent() }.toSet()
+            } else {
+                setOf(classifier.toEvent())
+            }
+        }
     }
 }
 
@@ -338,6 +367,34 @@ class SensoryEventsBuilder {
     internal fun build() = events.map { it.key.toEvent(it.value) }
 }
 
+@RecipeDslMarker
+class CheckpointEventBuilder {
+
+    private val requiredEvents: MutableSet<String> = mutableSetOf()
+    private val requiredOneOfEvents: MutableSet<Set<String>> = mutableSetOf()
+
+    /**
+     * All events specified in this block have to be available for the checkpoint to be executed (AND precondition).
+     *
+     * @see requiredOneOfEvents
+     */
+    fun requiredEvents(init: InteractionRequiredEventsBuilder.() -> Unit) {
+        requiredEvents.addAll(InteractionRequiredEventsBuilder().apply(init).build())
+    }
+
+    /**
+     * One of the events specified in this block have to be available for the checkpoint to be
+     * executed (OR precondition).
+     *
+     * @see requiredEvents
+     */
+    fun requiredOneOfEvents(init: InteractionRequiredOneOfEventsBuilder.() -> Unit) {
+        requiredOneOfEvents.add(InteractionRequiredOneOfEventsBuilder().apply(init).build())
+    }
+
+    internal fun build(eventName: String) = CheckPointEvent(eventName, requiredEvents, requiredOneOfEvents)
+}
+
 sealed interface InteractionFailureStrategyBuilder {
     fun build(): com.ing.baker.recipe.common.InteractionFailureStrategy
 }
@@ -397,12 +454,9 @@ private fun <T : com.ing.baker.recipe.javadsl.Interaction> KClass<T>.interaction
 private fun KClass<*>.toEvent(maxFiringLimit: Int? = null): Event {
     return Event(
         simpleName,
-        primaryConstructor?.parameters?.map {
-            Ingredient(
-                it.name,
-                it.type.javaType
-            )
-        },
+        primaryConstructor?.parameters?.map { Ingredient(it.name, it.type.javaType) },
         Optional.ofNullable(maxFiringLimit)
     )
 }
+
+private fun KFunction<*>.hasFiresEventAnnotation() = annotations.any { it.annotationClass == FiresEvent::class }
